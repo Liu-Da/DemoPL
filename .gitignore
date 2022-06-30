@@ -3,4 +3,4 @@
 saved_model/*
 *.parquet
 *.csv
-
+.DS_Store
