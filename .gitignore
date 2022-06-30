@@ -1,2 +1,6 @@
 *.DS_Store
 *.pyc
+saved_model/*
+*.parquet
+*.csv
+
