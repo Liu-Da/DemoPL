@@ -12,6 +12,8 @@ conda install python="3.9.12"
 
 # 安装 pytorch
 conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch
+# for a100
+ pip3 install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 -f https://download.pytorch.org/whl/torch_stable.html
 
 # 安装 pytorch-lightning
 pip install --trusted-host mirrors.aliyun.com -i  http://mirrors.aliyun.com/pypi/simple/ pytorch-lightning
