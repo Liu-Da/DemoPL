@@ -1,3 +1,4 @@
-from .gpu_detecter import gpu_detecter
+from .detector import hardware_detector, platform_detector
+from .instantiate import instantiate
 
-__all__ = ["gpu_detecter"]
+__all__ = ["hardware_detector", "platform_detector", "instantiate"]
