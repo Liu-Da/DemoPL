@@ -40,7 +40,7 @@ def load_detector_info(config):
 
     # auto detect if we run on M1 Mac
     num_workers = 0 if arch_info == "ARM" else cpu_num
-    config.datamodule.params.num_workers = num_workers
+    config.datamodule.params.num_workers = num_workers // 8
 
         
 @pl.utilities.rank_zero_only

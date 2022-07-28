@@ -18,8 +18,9 @@ class ONNXModel():
         self.output_shape = self.get_output_shape()
         self.input_dtype = self.get_intput_dtype()
         self.output_dtype = self.get_output_dtype()
-
+        
         print(f"{'Inputs':=^45}\n")
+      
         for name, shape in self.input_shape.items():
             print('{0:<15}{1:<15}{2:<15}\n'.format(str(name), str(shape), str(self.input_dtype[name])))
 
@@ -70,7 +71,8 @@ class ONNXModel():
 
 if __name__ == '__main__':
     print(onnxruntime.get_device())
-    onnx_path = './model.onnx'
+    onnx_path = './checkpoints/clip_match/model.onnx'
+    # onnx_path = './model.onnx'
     onnx_model = ONNXModel(onnx_path)
     
     # input_feed = {}

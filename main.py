@@ -8,8 +8,9 @@ import utils
 
 warnings.filterwarnings('ignore')
 
-@config.AutoConf(config_path="config", config_name="mnist")
+@config.AutoConf(config_path="config", config_name="clip_match")
 def main(config: omegaconf.OmegaConf):
+
     # Init train lightning callbacks
     train_callbacks = utils.instantiate(config.callbacks.train)
 
@@ -24,10 +25,14 @@ def main(config: omegaconf.OmegaConf):
 
     # Init lightning model
     model = utils.instantiate(config.model)
-
     # Training
     trainer = utils.instantiate(config.trainer.train, callbacks=train_callbacks, logger=logger)
-    trainer.fit(model=model, datamodule=datamodule)
+
+    if config.resume.ckpt_path:
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=config.resume.ckpt_path)
+    else:
+        trainer.fit(model=model, datamodule=datamodule)
+
     best_ckpt_path = trainer.checkpoint_callback.best_model_path
 
     # Testing
@@ -38,15 +43,16 @@ def main(config: omegaconf.OmegaConf):
         trainer.test(model=best_model, datamodule=datamodule,  verbose=False)
 
         # Save onnx
-        filepath = "model.onnx"
+        ckpt_path = config.callbacks.train.model_checkpoint.dirpath
+        filepath = f"{ckpt_path}"
         best_model.to_onnx(filepath, export_params=True, opset_version=11)
         print(f"Saved onnx model to {filepath}")
 
-        # Save torchscript
-        filepath = "model.pt"
-        script = best_model.to_torchscript(method="trace")
-        torch.jit.save(script, filepath)
-        print(f"Saved torchscript model to {filepath}")
+        # # Save torchscript
+        # filepath = f"{ckpt_path}/model.pt"
+        # script = best_model.to_torchscript(method="trace")
+        # torch.jit.save(script, filepath)
+        # print(f"Saved torchscript model to {filepath}")
 
 if __name__ == '__main__':
     main()
