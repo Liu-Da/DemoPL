@@ -5,6 +5,8 @@ import torchmetrics
 import transformers
 from pytorch_lightning.utilities import _TORCH_GREATER_EQUAL_1_10
 from typing import List, Dict, Tuple
+
+
 transformers.logging.set_verbosity_error()
 
 
@@ -18,15 +20,15 @@ class ClipMatch(pl.LightningModule):
         self.cluster_backbone = transformers.AutoModel.from_pretrained(self.params.cluster_backbone_path)
         self.item_backbone = transformers.AutoModel.from_pretrained(self.params.item_backbone_path)
 
-        # freeze params in backbone
-        for index, (name, param) in enumerate(list(self.cluster_backbone.named_parameters())):
-            if index<101:
-                param.requires_grad = False
-                print(index, "Freezed", name)
-        for index, (name, param) in enumerate(list(self.item_backbone.named_parameters())):
-            if index<101:
-                param.requires_grad = False
-                print(index, "Freezed", name)
+        # # freeze params in backbone
+        # for index, (name, param) in enumerate(list(self.cluster_backbone.named_parameters())):
+        #     if index<53:
+        #         param.requires_grad = False
+        #         print(index, "Freezed", name)
+        # for index, (name, param) in enumerate(list(self.item_backbone.named_parameters())):
+        #     if index<53:
+        #         param.requires_grad = False
+        #         print(index, "Freezed", name)
 
 
         self.cluster_name_ffn = torch.nn.Sequential(
@@ -85,13 +87,15 @@ class ClipMatch(pl.LightningModule):
 
         logits_per_item = logits_per_cluster.transpose(0,1)
 
-        return logits_per_cluster, logits_per_item
+        return logits_per_cluster, logits_per_item, cluster_name_logist,item_name_logist
 
     def training_step(self, batch, batch_idx):
         cluster_name = batch['cluster_name']
         item_name = batch['item_name']
 
         logits_per_cluster, logits_per_item = self.forward(cluster_name, item_name)
+        _logits_per_cluster, _logits_per_item = self.forward(cluster_name, item_name)
+
         logits_per_cluster_max = logits_per_cluster.argmax(axis=1)
         logits_per_item_max = logits_per_item.argmax(axis=1)
         
@@ -102,11 +106,17 @@ class ClipMatch(pl.LightningModule):
         clip_item_max_acc = torch.sum(logits_per_item_max==cluster_label_idx)/len(logits_per_cluster)
 
         clip_loss = self.clip_loss(logits_per_cluster)
+        clip_loss += self.clip_loss(_logits_per_cluster)
 
+        
+        clip_loss += self.compute_kl_loss(logits_per_cluster, _logits_per_cluster) * 0.5
+
+        diff = torch.sum(logits_per_cluster-_logits_per_cluster)
         # https://pytorch-lightning.readthedocs.io/en/stable/api/pytorch_lightning.core.LightningModule.html#pytorch_lightning.core.LightningModule.log_dict
         # Set the log_dict to be synchronized in distributed training
 
         _log_dict = {
+            'diff': diff,
             'mean_logits': logits_per_cluster.mean(),
             'max_logits': logits_per_cluster.max(),
             # 'logit_scale': logit_scale,
@@ -153,11 +163,14 @@ class ClipMatch(pl.LightningModule):
 
         logits_per_cluster, logits_per_item = self.forward(cluster_name, item_name)
         
-        flatten_cluster_res_5 = (logits_per_cluster>0.5).float().flatten()
+        logits_per_cluster_max = logits_per_cluster.argmax(axis=1)
+        logits_per_item_max = logits_per_item.argmax(axis=1)
+
+        cluster_label_idx = torch.arange(len(logits_per_cluster), device=logits_per_cluster.device)
         flatten_cluster_label = torch.eye(len(logits_per_cluster), device=logits_per_cluster.device, dtype=torch.long).flatten()
 
-        clip_acc = self.test_clip_acc(flatten_cluster_res_5,flatten_cluster_label)
-        # precision, recall, thresholds = self.test_clip_pr_curve(flatten_cluster_res,flatten_cluster_label)
+        clip_cluster_max_acc = torch.sum(logits_per_cluster_max==cluster_label_idx)/len(logits_per_cluster)
+        clip_item_max_acc = torch.sum(logits_per_item_max==cluster_label_idx)/len(logits_per_cluster)
 
         clip_loss = self.clip_loss(logits_per_cluster)
 
@@ -165,8 +178,8 @@ class ClipMatch(pl.LightningModule):
         # Set the log_dict to be synchronized in distributed training
         self.log_dict({
             'test_loss': clip_loss,
-            'test_acc': clip_acc,
-
+            'test_clip_cluster_max_acc':clip_cluster_max_acc,
+            'test_clip_item_max_acc':clip_item_max_acc,
         }, sync_dist=True)
 
     def configure_optimizers(self):
@@ -186,31 +199,46 @@ class ClipMatch(pl.LightningModule):
         item_loss = self.contrastive_loss(similarity.transpose(0,1))
         return (item_loss + cluster_loss) / 2.0
 
-    def resume_from_last(self):
-        if self.params.resume:
-            import os
-            ckpt_dir = os.path.abspath(self.params.ckpt_dirpath)
-            last_ckpt = [fn for fn in os.listdir(ckpt_dir) if fn.endswith(".ckpt")][-1]
-            last_ckpt = f'{ckpt_dir}/{last_ckpt}'
-            self.load_from_checkpoint(last_ckpt)
-            print(f'resume from last ckpt {last_ckpt}')
+    def compute_kl_loss(self, p, q, pad_mask=None):
+        """
+        Compute symmetric Kullback-Leibler divergence Loss.
+        """
+        p = p.flatten()
+        q = q.flatten()
+        p_loss = torch.nn.functional.kl_div(torch.nn.functional.log_softmax(p, dim=-1),
+                        torch.nn.functional.softmax(q, dim=-1), reduction='none')
+        q_loss = torch.nn.functional.kl_div(torch.nn.functional.log_softmax(q, dim=-1),
+                        torch.nn.functional.softmax(p, dim=-1), reduction='none')
+
+        # pad_mask is for seq-level tasks
+        if pad_mask is not None:
+            p_loss.masked_fill_(pad_mask, 0.)
+            q_loss.masked_fill_(pad_mask, 0.)
+
+        # You can choose whether to use function "sum" and "mean" depending on your task
+        p_loss = p_loss.sum()
+        q_loss = q_loss.sum()
+
+        loss = (p_loss + q_loss) / 2
+        return loss
+
     
-    def get_cluster_feature(self, cluster_name):
-        if type(cluster_name) ==torch.Tensor:
-            cluster_name_logist = self.cluster_name_ffn(self.cluster_backbone(cluster_name).last_hidden_state[:,0])
+    def get_cluster_feature(self, input_ids,attention_mask=None):
+        if type(input_ids) ==torch.Tensor:
+            cluster_name_logist = self.cluster_name_ffn(self.cluster_backbone(input_ids = input_ids, attention_mask = attention_mask).last_hidden_state[:,0])
         else:
-            cluster_name_logist = self.cluster_name_ffn(self.cluster_backbone(**cluster_name).last_hidden_state[:,0])
+            cluster_name_logist = self.cluster_name_ffn(self.cluster_backbone(**input_ids).last_hidden_state[:,0])
 
         # normalized features
         cluster_name_logist = cluster_name_logist / cluster_name_logist.norm(p=2, dim=-1, keepdim=True)
 
         return cluster_name_logist
 
-    def get_item_feature(self, item_name):
-        if type(item_name) ==torch.Tensor:
-            item_name_logist = self.item_name_ffn(self.item_backbone(item_name).last_hidden_state[:,0])
+    def get_item_feature(self, input_ids,attention_mask=None):
+        if type(input_ids) ==torch.Tensor:
+            item_name_logist = self.item_name_ffn(self.item_backbone(input_ids = input_ids, attention_mask = attention_mask).last_hidden_state[:,0])
         else:
-            item_name_logist = self.item_name_ffn(self.item_backbone(**item_name).last_hidden_state[:,0])
+            item_name_logist = self.item_name_ffn(self.item_backbone(**input_ids).last_hidden_state[:,0])
 
         # normalized features
         item_name_logist = item_name_logist / item_name_logist.norm(p=2, dim=-1, keepdim=True)
@@ -232,7 +260,9 @@ class ClipMatch(pl.LightningModule):
 
         input_sample = self._apply_batch_transfer_handler(input_sample)
         cluster_name, item_name = input_sample
-        
+        cluster_attention_mask = torch.randint(high=2, size=(1, self.params.max_cluster_name_length))
+        item_attention_mask = torch.randint(high=2, size=(1, self.params.max_item_name_length))
+
         # export cluster_backbone
         original_forward = self.forward
         self.forward = self.get_cluster_feature
@@ -244,9 +274,9 @@ class ClipMatch(pl.LightningModule):
             else:
                 kwargs["example_outputs"] = self(cluster_name)
 
-        kwargs['input_names'] = ["cluster_input"]    
+        kwargs['input_names'] = ["cluster_input","cluster_attention_mask"]    
         kwargs['output_names'] = ["cluster_embeds"]                    
-        torch.onnx.export(self, cluster_name, file_path+'/cluster.onnx', **kwargs)
+        torch.onnx.export(self, (cluster_name,cluster_attention_mask), file_path+'/cluster.onnx', **kwargs)
 
         # export item_backbone
         self.forward = self.get_item_feature
@@ -258,9 +288,9 @@ class ClipMatch(pl.LightningModule):
             else:
                 kwargs["example_outputs"] = self(item_name)
 
-        kwargs['input_names'] = ["item_input"]    
+        kwargs['input_names'] = ["item_input","item_attention_mask"]    
         kwargs['output_names'] = ["item_embeds"]                    
-        torch.onnx.export(self, item_name, file_path+'/item.onnx', **kwargs)
+        torch.onnx.export(self, (item_name,item_attention_mask), file_path+'/item.onnx', **kwargs)
 
         # reset model state
         self.forward = original_forward

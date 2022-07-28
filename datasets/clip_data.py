@@ -81,15 +81,15 @@ class ClipDataset(torch.utils.data.Dataset):
             if len(item_image.size) == 2 or item_image.mode != 'RGB':
                 item_image = item_image.convert('RGB')
             return item_image, item_name
-        # try:
-        #     r = requests.get(image_url, stream=True)
-        #     item_image = Image.open(io.BytesIO(r.content))
-        #     if len(item_image.size) == 2 or item_image.mode != 'RGB':
-        #         item_image = item_image.convert('RGB')
-        #     return item_image, item_name
-        except Exception as e:
-            print(str(e))
-            print(image_path)
+        except:
+            r = requests.get(image_url, stream=True)
+            item_image = Image.open(io.BytesIO(r.content))
+            if len(item_image.size) == 2 or item_image.mode != 'RGB':
+                item_image = item_image.convert('RGB')
+            return item_image, item_name
+        # except Exception as e:
+            # print(str(e))
+            # print(image_path)
 
     def collate_fn(self, batch):
         batch = filter(lambda x : x is not None, batch)

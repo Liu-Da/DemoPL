@@ -90,7 +90,7 @@ class Clip(pl.LightningModule):
 
         logits_per_text = logits_per_image.transpose(0,1)
 
-        return logits_per_image, logits_per_text
+        return logits_per_image, logits_per_text, image_logist, text_logist
 
     def training_step(self, batch, batch_idx):
         
@@ -156,12 +156,15 @@ class Clip(pl.LightningModule):
         item_name = batch['item_name']
 
         logits_per_image, logits_per_text = self.forward(item_image, item_name)
-        
-        flatten_image_res_5 = (logits_per_image>0.5).float().flatten()
+
+        logits_per_image_max = logits_per_image.argmax(axis=1)
+        logits_per_text_max = logits_per_text.argmax(axis=1)
+
+        image_label_idx = torch.arange(len(logits_per_image), device=logits_per_image.device)
         flatten_image_label = torch.eye(len(logits_per_image), device=logits_per_image.device, dtype=torch.long).flatten()
 
-        clip_acc = self.test_clip_acc(flatten_image_res_5,flatten_image_label)
-        # precision, recall, thresholds = self.test_clip_pr_curve(flatten_image_res,flatten_image_label)
+        clip_cluster_max_acc = torch.sum(logits_per_image_max==image_label_idx)/len(logits_per_image)
+        clip_item_max_acc = torch.sum(logits_per_text_max==image_label_idx)/len(logits_per_image)
 
         clip_loss = self.clip_loss(logits_per_image)
 
@@ -169,7 +172,8 @@ class Clip(pl.LightningModule):
         # Set the log_dict to be synchronized in distributed training
         self.log_dict({
             'test_loss': clip_loss,
-            'test_acc': clip_acc,
+            'test_clip_cluster_max_acc':clip_cluster_max_acc,
+            'test_clip_item_max_acc':clip_item_max_acc,
 
         }, sync_dist=True)
 
@@ -212,11 +216,11 @@ class Clip(pl.LightningModule):
 
         return image_logist
 
-    def get_text_feature(self, item_name):
-        if type(item_name) ==torch.Tensor:
-            text_logist = self.text_ffn(self.text_backbone(item_name).last_hidden_state[:,0])
+    def get_text_feature(self, input_ids,attention_mask=None):
+        if type(input_ids) ==torch.Tensor:
+            text_logist = self.text_ffn(self.text_backbone(input_ids = input_ids, attention_mask = attention_mask).last_hidden_state[:,0])
         else:
-            text_logist = self.text_ffn(self.text_backbone(**item_name).last_hidden_state[:,0])
+            text_logist = self.text_ffn(self.text_backbone(**input_ids).last_hidden_state[:,0])
 
         # normalized features
         text_logist = text_logist / torch.norm(text_logist, p=2, dim=1, keepdim=True)
@@ -237,8 +241,8 @@ class Clip(pl.LightningModule):
             input_sample = self.example_input_array
 
         input_sample = self._apply_batch_transfer_handler(input_sample)
-        item_image, item_name = input_sample
-        
+        item_image, input_ids = input_sample
+        attention_mask = torch.randint(high=2, size=(1, self.params.max_text_length))
         # export cluster_backbone
         original_forward = self.forward
         self.forward = self.get_image_feature
@@ -250,7 +254,7 @@ class Clip(pl.LightningModule):
             else:
                 kwargs["example_outputs"] = self(item_image)
 
-        kwargs['input_names'] = ["image_input"]    
+        kwargs['input_names'] = ["image_input"]
         kwargs['output_names'] = ["image_embeds"]                    
         torch.onnx.export(self, item_image, file_path+'/image.onnx', **kwargs)
 
@@ -259,14 +263,15 @@ class Clip(pl.LightningModule):
 
         if not _TORCH_GREATER_EQUAL_1_10:
             self.eval()
-            if isinstance(item_name, Tuple):
-                kwargs["example_outputs"] = self(*item_name)
+            if isinstance(input_ids, Tuple):
+                kwargs["example_outputs"] = self(*input_ids)
             else:
-                kwargs["example_outputs"] = self(item_name)
+                kwargs["example_outputs"] = self(input_ids)
 
-        kwargs['input_names'] = ["text_input"]    
-        kwargs['output_names'] = ["text_embeds"]                    
-        torch.onnx.export(self, item_name, file_path+'/text.onnx', **kwargs)
+        kwargs['input_names'] = ["text_input",'text_attention_mask']  
+        kwargs['output_names'] = ["text_embeds"]
+              
+        torch.onnx.export(self,(input_ids,attention_mask), file_path+'/text.onnx', **kwargs)
 
         # reset model state
         self.forward = original_forward
